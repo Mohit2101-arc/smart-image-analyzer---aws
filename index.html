@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Smart Image Analyzer</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: Arial, sans-serif; background: #f1f5f9; color: #1e293b; }
+  header { background: #232f3e; color: #fff; padding: 20px; text-align: center; }
+  header h1 { margin: 0; font-size: 26px; }
+  header p { margin: 6px 0 0; color: #ff9900; font-size: 14px; }
+  .container { max-width: 800px; margin: 30px auto; padding: 0 16px; }
+  .card { background: #fff; border-radius: 12px; padding: 24px; box-shadow: 0 2px 8px rgba(0,0,0,0.08); margin-bottom: 20px; }
+  #dropzone { border: 2px dashed #94a3b8; border-radius: 12px; padding: 40px 20px; text-align: center; cursor: pointer; color: #475569; }
+  #dropzone.dragover { background: #fff7e6; border-color: #ff9900; }
+  #preview { display: none; max-width: 100%; max-height: 320px; margin: 16px auto 0; border-radius: 8px; }
+  #btn { background: #ff9900; color: #fff; border: none; border-radius: 8px; padding: 12px 28px; font-size: 16px; cursor: pointer; margin-top: 16px; }
+  #btn:disabled { background: #cbd5e1; cursor: not-allowed; }
+  #status { margin-top: 14px; font-size: 15px; text-align: center; }
+  .error { color: #dc2626; }
+  #summary { background: #fff7e6; border-left: 4px solid #ff9900; padding: 12px 16px; border-radius: 6px; margin-bottom: 16px; font-size: 15px; }
+  .tabs { display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; }
+  .tab { background: #e2e8f0; color: #334155; border: none; border-radius: 8px; padding: 10px 18px; font-size: 14px; cursor: pointer; }
+  .tab.active { background: #232f3e; color: #fff; }
+  .panel { display: none; }
+  .panel.active { display: block; }
+  .label-row { margin: 12px 0; }
+  .label-top { display: flex; justify-content: space-between; font-size: 15px; margin-bottom: 4px; }
+  .bar { background: #e2e8f0; border-radius: 6px; height: 10px; }
+  .fill { background: #ff9900; height: 10px; border-radius: 6px; }
+  .item { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 12px; margin: 10px 0; font-size: 15px; }
+  .safe { color: #16a34a; font-weight: bold; }
+  .flag { color: #dc2626; font-weight: bold; }
+  footer { text-align: center; color: #64748b; font-size: 13px; padding: 20px; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Smart Image Analyzer</h1>
+  <p>Powered by AWS S3, Lambda and Amazon Rekognition</p>
+</header>
+
+<div class="container">
+  <div class="card">
+    <div id="dropzone">
+      <p><b>Click to choose a photo</b> or drag and drop it here</p>
+      <p style="font-size:13px">JPG or PNG, under 3 MB</p>
+    </div>
+    <input type="file" id="file" accept="image/png, image/jpeg" hidden>
+    <img id="preview" alt="Preview">
+    <div style="text-align:center">
+      <button id="btn" disabled>Analyze Image</button>
+    </div>
+    <div id="status"></div>
+  </div>
+
+  <div class="card" id="results" style="display:none">
+    <div id="summary"></div>
+    <div class="tabs">
+      <button class="tab active" data-tab="objects">Objects</button>
+      <button class="tab" data-tab="text">Text</button>
+      <button class="tab" data-tab="faces">Faces</button>
+      <button class="tab" data-tab="safety">Safety</button>
+    </div>
+    <div class="panel active" id="tab-objects"></div>
+    <div class="panel" id="tab-text"></div>
+    <div class="panel" id="tab-faces"></div>
+    <div class="panel" id="tab-safety"></div>
+  </div>
+</div>
+
+<footer>Cloud Computing Project - AWS Tool Explorer</footer>
+
+<script>
+const API_URL = "PASTE_YOUR_FUNCTION_URL";
+const MAX_SIZE = 3 * 1024 * 1024;
+
+const dropzone = document.getElementById("dropzone");
+const fileInput = document.getElementById("file");
+const preview = document.getElementById("preview");
+const btn = document.getElementById("btn");
+const statusEl = document.getElementById("status");
+const results = document.getElementById("results");
+const summary = document.getElementById("summary");
+let selectedFile = null;
+
+function esc(s) {
+  return String(s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+}
+
+dropzone.onclick = () => fileInput.click();
+fileInput.onchange = () => handleFile(fileInput.files[0]);
+dropzone.ondragover = (e) => { e.preventDefault(); dropzone.classList.add("dragover"); };
+dropzone.ondragleave = () => dropzone.classList.remove("dragover");
+dropzone.ondrop = (e) => {
+  e.preventDefault();
+  dropzone.classList.remove("dragover");
+  handleFile(e.dataTransfer.files[0]);
+};
+
+document.querySelectorAll(".tab").forEach(t => {
+  t.onclick = () => {
+    document.querySelectorAll(".tab").forEach(x => x.classList.remove("active"));
+    document.querySelectorAll(".panel").forEach(x => x.classList.remove("active"));
+    t.classList.add("active");
+    document.getElementById("tab-" + t.dataset.tab).classList.add("active");
+  };
+});
+
+function handleFile(file) {
+  statusEl.textContent = "";
+  results.style.display = "none";
+  if (!file) return;
+  if (!["image/jpeg", "image/png"].includes(file.type)) {
+    statusEl.innerHTML = '<span class="error">Please choose a JPG or PNG image.</span>';
+    return;
+  }
+  if (file.size > MAX_SIZE) {
+    statusEl.innerHTML = '<span class="error">Image is too large. Choose one under 3 MB.</span>';
+    return;
+  }
+  selectedFile = file;
+  preview.src = URL.createObjectURL(file);
+  preview.style.display = "block";
+  btn.disabled = false;
+}
+
+btn.onclick = () => {
+  if (!selectedFile) return;
+  btn.disabled = true;
+  statusEl.textContent = "Analyzing image, please wait...";
+  results.style.display = "none";
+
+  const reader = new FileReader();
+  reader.onload = async () => {
+    try {
+      const base64 = reader.result.split(",")[1];
+      const res = await fetch(API_URL, {
+        method: "POST",
+        body: JSON.stringify({ image: base64 })
+      });
+      const data = await res.json();
+      if (!res.ok || data.error) throw new Error(data.error || ("Server returned " + res.status));
+      showResults(data);
+      statusEl.textContent = "Done!";
+    } catch (err) {
+      statusEl.innerHTML = '<span class="error">Something went wrong: ' + esc(err.message) + '</span>';
+    }
+    btn.disabled = false;
+  };
+  reader.readAsDataURL(selectedFile);
+};
+
+function showResults(d) {
+  const safe = d.moderation.length === 0;
+  summary.innerHTML =
+    "Found <b>" + d.labels.length + "</b> objects, <b>" + d.text.length + "</b> text lines, <b>" +
+    d.faces.length + "</b> face(s). Image safety: " +
+    (safe ? '<span class="safe">Safe</span>' : '<span class="flag">Flagged</span>') + ".";
+
+  document.getElementById("tab-objects").innerHTML = d.labels.length
+    ? d.labels.map(l => `
+        <div class="label-row">
+          <div class="label-top"><span>${esc(l.name)}</span><span>${l.confidence}%</span></div>
+          <div class="bar"><div class="fill" style="width:${l.confidence}%"></div></div>
+        </div>`).join("")
+    : "<p>No objects found.</p>";
+
+  document.getElementById("tab-text").innerHTML = d.text.length
+    ? d.text.map(t => `<div class="item">${esc(t.text)} <span style="float:right">${t.confidence}%</span></div>`).join("")
+    : "<p>No text found in this image.</p>";
+
+  document.getElementById("tab-faces").innerHTML = d.faces.length
+    ? d.faces.map((f, i) => `
+        <div class="item">
+          <b>Face ${i + 1}</b><br>
+          Age range: ${f.age_low} to ${f.age_high} years<br>
+          Emotion: ${esc(f.emotion)}<br>
+          Smiling: ${f.smile ? "Yes" : "No"}<br>
+          Glasses: ${f.glasses ? "Yes" : "No"}
+        </div>`).join("")
+    : "<p>No faces found in this image.</p>";
+
+  document.getElementById("tab-safety").innerHTML = safe
+    ? '<p class="safe">No unsafe content detected.</p>'
+    : d.moderation.map(m => `<div class="item flag">${esc(m.name)} <span style="float:right">${m.confidence}%</span></div>`).join("");
+
+  results.style.display = "block";
+}
+</script>
+</body>
+</html>
